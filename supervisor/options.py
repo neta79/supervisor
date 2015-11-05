@@ -48,7 +48,6 @@ from supervisor.datatypes import url
 from supervisor.datatypes import Automatic
 from supervisor.datatypes import auto_restart
 from supervisor.datatypes import profile_options
-from supervisor.datatypes import set_here
 
 from supervisor import loggers
 from supervisor import states
@@ -352,7 +351,6 @@ class Options:
         # Process config file
         if not hasattr(self.configfile, 'read'):
             self.here = os.path.abspath(os.path.dirname(self.configfile))
-            set_here(self.here)
         try:
             self.read_config(self.configfile)
         except ValueError as msg:
@@ -396,7 +394,13 @@ class Options:
         return factories
 
     def import_spec(self, spec):
-        return pkg_resources.EntryPoint.parse("x="+spec).load(False)
+        ep = pkg_resources.EntryPoint.parse("x=" + spec)
+        if hasattr(ep, 'resolve'):
+            # this is available on setuptools >= 10.2
+            return ep.resolve()
+        else:
+            # this causes a DeprecationWarning on setuptools >= 11.3
+            return ep.load(False)
 
 
 class ServerOptions(Options):
@@ -550,10 +554,8 @@ class ServerOptions(Options):
                 need_close = True
             except (IOError, OSError):
                 raise ValueError("could not read config file %s" % fp)
-        kwargs = {}
-        if PY3:
-            kwargs['inline_comment_prefixes'] = (';','#')
-        parser = UnhosedConfigParser(**kwargs)
+
+        parser = UnhosedConfigParser()
         parser.expansions = self.environ_expansions
         try:
             try:
@@ -951,6 +953,15 @@ class ServerOptions(Options):
                         'rollover, set maxbytes > 0 to avoid filling up '
                         'filesystem unintentionally' % (section, n))
 
+            if redirect_stderr:
+                if logfiles['stderr_logfile'] not in (Automatic, None):
+                    self.parse_warnings.append(
+                        'For [%s], redirect_stderr=true but stderr_logfile has '
+                        'also been set to a filename, the filename has been '
+                        'ignored' % section)
+                # never create an stderr logfile when redirected
+                logfiles['stderr_logfile'] = None
+
             command = get(section, 'command', None, expansions=expansions)
             if command is None:
                 raise ValueError(
@@ -1038,13 +1049,12 @@ class ServerOptions(Options):
         for name, section in unix_serverdefs:
             config = {}
             get = parser.saneget
-            sfile = get(section, 'file', None)
+            sfile = get(section, 'file', None, expansions={'here': self.here})
             if sfile is None:
                 raise ValueError('section [%s] has no file value' % section)
             sfile = sfile.strip()
             config['name'] = name
             config['family'] = socket.AF_UNIX
-            sfile = expand(sfile, {'here':self.here}, 'socket file')
             config['file'] = normalize_path(sfile)
             config.update(self._parse_username_and_password(parser, section))
             chown = get(section, 'chown', None)
@@ -1608,35 +1618,33 @@ class ClientOptions(Options):
                 need_close = True
             except (IOError, OSError):
                 raise ValueError("could not read config file %s" % fp)
-        kwargs = {}
-        if PY3:
-            kwargs['inline_comment_prefixes'] = (';','#')
-        config = UnhosedConfigParser(**kwargs)
-        config.expansions = self.environ_expansions
-        config.mysection = 'supervisorctl'
+
+        parser = UnhosedConfigParser()
+        parser.expansions = self.environ_expansions
+        parser.mysection = 'supervisorctl'
         try:
-            config.read_file(fp)
+            parser.read_file(fp)
         except AttributeError:
-            config.readfp(fp)
+            parser.readfp(fp)
         if need_close:
             fp.close()
-        sections = config.sections()
+        sections = parser.sections()
         if not 'supervisorctl' in sections:
             raise ValueError('.ini file does not include supervisorctl section')
-        serverurl = config.getdefault('serverurl', 'http://localhost:9001')
+        serverurl = parser.getdefault('serverurl', 'http://localhost:9001',
+            expansions={'here': self.here})
         if serverurl.startswith('unix://'):
-            sf = serverurl[7:]
-            path = expand(sf, {'here':self.here}, 'serverurl')
-            path = normalize_path(path)
+            path = normalize_path(serverurl[7:])
             serverurl = 'unix://%s' % path
         section.serverurl = serverurl
 
         # The defaults used below are really set in __init__ (since
         # section==self.configroot.supervisorctl)
-        section.prompt = config.getdefault('prompt', section.prompt)
-        section.username = config.getdefault('username', section.username)
-        section.password = config.getdefault('password', section.password)
-        history_file = config.getdefault('history_file', section.history_file)
+        section.prompt = parser.getdefault('prompt', section.prompt)
+        section.username = parser.getdefault('username', section.username)
+        section.password = parser.getdefault('password', section.password)
+        history_file = parser.getdefault('history_file', section.history_file,
+            expansions={'here': self.here})
 
         if history_file:
             history_file = normalize_path(history_file)
@@ -1647,7 +1655,7 @@ class ClientOptions(Options):
             self.history_file = None
 
         self.plugin_factories += self.get_plugins(
-            config,
+            parser,
             'supervisor.ctl_factory',
             'ctlplugin:'
             )
@@ -1672,16 +1680,46 @@ class UnhosedConfigParser(ConfigParser.RawConfigParser):
     mysection = 'supervisord'
 
     def __init__(self, *args, **kwargs):
+        # inline_comment_prefixes was added in Python 3 but its default makes
+        # RawConfigParser behave differently than it did on Python 2.  This
+        # makes it behave the same by default on Python 2 and 3.
+        if PY3 and ('inline_comment_prefixes' not in kwargs):
+            kwargs['inline_comment_prefixes'] = (';', '#')
+
         ConfigParser.RawConfigParser.__init__(self, *args, **kwargs)
+
         self.section_to_file = {}
         self.expansions = {}
 
-    def read_string(self, s):
-        s = StringIO(s)
+    def read_string(self, string, source='<string>'):
+        '''Parse configuration data from a string.  This is intended
+        to be used in tests only.  We add this method for Py 2/3 compat.'''
         try:
-            return self.read_file(s) # Python 3.2 or later
+            return ConfigParser.RawConfigParser.read_string(
+                self, string, source) # Python 3.2 or later
         except AttributeError:
-            return self.readfp(s)
+            return self.readfp(StringIO(string))
+
+    def read(self, filenames, **kwargs):
+        '''Attempt to read and parse a list of filenames, returning a list
+        of filenames which were successfully parsed.  This is a method of
+        RawConfigParser that is overridden to build self.section_to_file,
+        which is a mapping of section names to the files they came from.
+        '''
+        if isinstance(filenames, basestring):  # RawConfigParser compat
+            filenames = [filenames]
+
+        ok_filenames = []
+        for filename in filenames:
+            sections_orig = self._sections.copy()
+
+            ok_filenames.extend(
+                ConfigParser.RawConfigParser.read(self, [filename], **kwargs))
+
+            diff = frozenset(self._sections) - frozenset(sections_orig)
+            for section in diff:
+                self.section_to_file[section] = filename
+        return ok_filenames
 
     def saneget(self, section, option, default=_marker, do_expand=True,
                 expansions={}):
@@ -1706,29 +1744,12 @@ class UnhosedConfigParser(ConfigParser.RawConfigParser):
         return self.saneget(self.mysection, option, default=default,
                             expansions=expansions, **kwargs)
 
-    def read(self, filenames, **kwargs):
-        if isinstance(filenames, basestring):  # RawConfigParser compat
-            filenames = [filenames]
-
-        ok_filenames = []
-        for filename in filenames:
-            sections_orig = self._sections.copy()
-
-            ok_filenames.extend(
-                ConfigParser.RawConfigParser.read(self, [filename], **kwargs))
-
-            diff = frozenset(self._sections) - frozenset(sections_orig)
-            for section in diff:
-                self.section_to_file[section] = filename
-        return ok_filenames
-
     def expand_here(self, here):
-        if here is None:
-            return
         HERE_FORMAT = '%(here)s'
         for section in self.sections():
             for key, value in self.items(section):
                 if HERE_FORMAT in value:
+                    assert here is not None, "here has not been set to a path"
                     value = value.replace(HERE_FORMAT, here)
                     self.set(section, key, value)
 

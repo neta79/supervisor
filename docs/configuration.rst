@@ -20,11 +20,6 @@ file it finds.
 
 #. :file:`../supervisord.conf` (Relative to the executable)
 
-:file:`supervisord.conf` is a Windows-INI-style (Python ConfigParser)
-file.  It has sections (each denoted by a ``[header]``) and key / value
-pairs within the sections.  The sections and their allowable values
-are described below.
-
 .. note::
 
   Some distributions have packaged Supervisor with their own
@@ -32,6 +27,36 @@ are described below.
   configuration file from locations other than those described here.
   Notably, Ubuntu packages have been found that use
   ``/etc/supervisor/supervisord.conf``.
+
+File Format
+-----------
+
+:file:`supervisord.conf` is a Windows-INI-style (Python ConfigParser)
+file.  It has sections (each denoted by a ``[header]``) and key / value
+pairs within the sections.  The sections and their allowable values
+are described below.
+
+Environment Variables
+~~~~~~~~~~~~~~~~~~~~~
+
+Environment variables that are present in the environment at the time that
+:program:`supervisord` is started can be used in the configuration file
+using the Python string expression syntax ``%(ENV_X)s``:
+
+.. code-block:: ini
+
+    [program:example]
+    command=/usr/bin/example --loglevel=%(ENV_LOGLEVEL)s
+
+In the example above, the expression ``%(ENV_LOGLEVEL)s`` would be expanded
+to the value of the environment variable ``LOGLEVEL``.
+
+.. note::
+
+    In Supervisor 3.2 and later, ``%(ENV_X)s`` expressions are supported in
+    all options.  In prior versions, some options support them, but most
+    do not.  See the documentation for each option below.
+
 
 ``[unix_http_server]`` Section Settings
 ---------------------------------------
@@ -318,7 +343,7 @@ follows.
 ``nocleanup``
 
   Prevent supervisord from clearing any existing ``AUTO``
-  chlild log files at startup time.  Useful for debugging.
+  child log files at startup time.  Useful for debugging.
 
   *Default*:  false
 
@@ -649,30 +674,19 @@ where specified.
 
   *Introduced*: 3.0
 
-``autorestart``
-
-  May be one of ``false``, ``unexpected``, or ``true``.  If ``false``,
-  the process will never be autorestarted.  If ``unexpected``, the
-  process will be restart when the program exits with an exit code
-  that is not one of the exit codes associated with this process'
-  configuration (see ``exitcodes``).  If ``true``, the process will be
-  unconditionally restarted when it exits, without regard to its exit
-  code.
-
-  *Default*: unexpected
-
-  *Required*:  No.
-
-  *Introduced*: 3.0
-
 ``startsecs``
 
   The total number of seconds which the program needs to stay running
-  after a startup to consider the start successful.  If the program
-  does not stay up for this many seconds after it has started, even if
-  it exits with an "expected" exit code (see ``exitcodes``), the
-  startup will be considered a failure.  Set to ``0`` to indicate that
-  the program needn't stay running for any particular amount of time.
+  after a startup to consider the start successful (moving the process
+  from the ``STARTING`` state to the ``RUNNING`` state).  Set to ``0``
+  to indicate that the program needn't stay running for any particular
+  amount of time.
+
+  .. note::
+
+      Even if a process exits with an "expected" exit code (see
+      ``exitcodes``), the start will still be considered a failure
+      if the process exits quicker than ``startsecs``.
 
   *Default*: 1
 
@@ -693,10 +707,38 @@ where specified.
 
   *Introduced*: 3.0
 
+``autorestart``
+
+  Specifies if :program:`supervisord` should automatically restart a
+  process if it exits when it is in the ``RUNNING`` state.  May be
+  one of ``false``, ``unexpected``, or ``true``.  If ``false``, the
+  process will not be autorestarted.  If ``unexpected``, the process
+  will be restarted when the program exits with an exit code that is
+  not one of the exit codes associated with this process' configuration
+  (see ``exitcodes``).  If ``true``, the process will be unconditionally
+  restarted when it exits, without regard to its exit code.
+
+  .. note::
+
+      ``autorestart`` controls whether :program:`supervisord` will
+      autorestart a program if it exits after it has successfully started
+      up (the process is in the ``RUNNING`` state).
+
+      :program:`supervisord` has a different restart mechanism for when the
+      process is starting up (the process is in the ``STARTING`` state).
+      Retries during process startup are controlled by ``startsecs``
+      and ``startretries``.
+
+  *Default*: unexpected
+
+  *Required*:  No.
+
+  *Introduced*: 3.0
+
 ``exitcodes``
 
-  The list of "expected" exit codes for this program.  If the
-  ``autorestart`` parameter is set to ``unexpected``, and the process
+  The list of "expected" exit codes for this program used with ``autorestart``.
+  If the ``autorestart`` parameter is set to ``unexpected``, and the process
   exits in any other way than as a result of a supervisor stop
   request, :program:`supervisord` will restart the process if it exits
   with an exit code that is not defined in this list.
@@ -1454,70 +1496,3 @@ And a section in the config file meant to configure it.
    [rpcinterface:another]
    supervisor.rpcinterface_factory = my.package:make_another_rpcinterface
    retries = 1
-
-Environment Variable Interpolation
-----------------------------------
-
-There may be a time where it is necessary to avoid hardcoded values in your
-configuration file (such as paths, port numbers, username, etc). Some teams
-may also put their supervisord.conf files under source control but may want
-to avoid committing sensitive information into the repository.
-
-With this, **all** the environment variables inherited by the ``supervisord``
-process are available and can be interpolated / expanded in **any**
-configuration value, under **any** section.
-
-Your configuration values may contain Python expressions for expanding
-the environment variables using the ``ENV_`` prefix. The sample syntax is
-``foo_key=%(ENV_FOO)s``, where the value of the environment variable ``FOO``
-will be assigned to the ``foo_key``. The string values of environment
-variables will be converted properly to their correct types.
-
-.. note::
-  - some sections such as ``[program:x]`` have other extra expansion options.
-  - environment variables in the configuration will be required, otherwise
-    supervisord will refuse to start.
-  - any changes to the variable requires a restart in the ``supervisord``
-    daemon.
-
-
-An example configuration snippet with customizable values:
-
-.. code-block:: ini
-
-   [supervisord]
-   logfile = %(ENV_MYSUPERVISOR_BASEDIR)s/%(ENV_MYSUPERVISOR_LOGFILE)s
-   logfile_maxbytes = %(ENV_MYSUPERVISOR_LOGFILE_MAXBYTES)s
-   logfile_backups=10
-   loglevel = info
-   pidfile = %(ENV_MYSUPERVISOR_BASEDIR)s/supervisor.pid
-   nodaemon = false
-   minfds = 1024
-   minprocs = 200
-   umask = 022
-   user = %(ENV_USER)s
-
-   [program:cat]
-   command=/bin/cat -x -y --optz=%(ENV_CAT_OPTZ)s
-   process_name=%(program_name)s
-   numprocs=%(ENV_CAT_NUMPROCS)s
-   directory=%(ENV_CAT_DIR)s
-   umask=022
-   priority=999
-   autostart=true
-   autorestart=unexpected
-   exitcodes=0,2
-   user=%(ENV_USER)s
-   redirect_stderr=false
-   stopwaitsecs=10
-
-The above sample config will require the following environment variables to be set:
-
-   - ``MYSUPERVISOR_BASEDIR``
-   - ``MYSUPERVISOR_LOGFILE``
-   - ``MYSUPERVISOR_LOGFILE_MAXBYTES``
-   - ``USER``
-   - ``CAT_OPTZ``
-   - ``CAT_NUMPROCS``
-   - ``CAT_DIRECTORY``
-
