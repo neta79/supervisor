@@ -16,17 +16,17 @@ file it finds.
 
 #. :file:`/etc/supervisord.conf`
 
+#. :file:`/etc/supervisor/supervisord.conf` (since Supervisor 3.3.0)
+
 #. :file:`../etc/supervisord.conf` (Relative to the executable)
 
 #. :file:`../supervisord.conf` (Relative to the executable)
 
 .. note::
 
-  Some distributions have packaged Supervisor with their own
-  customizations.  These modified versions of Supervisor may load the
-  configuration file from locations other than those described here.
-  Notably, Ubuntu packages have been found that use
-  ``/etc/supervisor/supervisord.conf``.
+  Many versions of Supervisor packaged for Debian and Ubuntu included a patch
+  that added ``/etc/supervisor/supervisord.conf`` to the search paths.  The
+  first PyPI package of Supervisor to include it was Supervisor 3.3.0.
 
 File Format
 -----------
@@ -365,9 +365,12 @@ follows.
 
 ``user``
 
-  If :program:`supervisord` is run as the root user, switch users to
-  this UNIX user account before doing any meaningful processing.  This
-  value has no effect if :program:`supervisord` is not run as root.
+  Instruct :program:`supervisord` to switch users to this UNIX user
+  account before doing any meaningful processing.  The user can only
+  be switched if :program:`supervisord` is started as the root user.
+  If :program:`supervisord` can't switch users, it will still continue
+  but will write a log message at the ``critical`` level saying that it
+  can't drop privileges.
 
   *Default*: do not switch users
 
@@ -762,10 +765,10 @@ where specified.
 
 ``stopwaitsecs``
 
-  The number of seconds to wait for the OS to return a SIGCHILD to
+  The number of seconds to wait for the OS to return a SIGCHLD to
   :program:`supervisord` after the program has been sent a stopsignal.
   If this number of seconds elapses before :program:`supervisord`
-  receives a SIGCHILD from the process, :program:`supervisord` will
+  receives a SIGCHLD from the process, :program:`supervisord` will
   attempt to kill it with a final SIGKILL.
 
   *Default*: 10
@@ -802,8 +805,9 @@ where specified.
 
 ``user``
 
-  If :program:`supervisord` runs as root, this UNIX user account will
-  be used as the account which runs the program.  If :program:`supervisord`
+  Instruct :program:`supervisord` to use this UNIX user account as the
+  account which runs the program.  The user can only be switched if
+  :program:`supervisord` is run as the root user.  If :program:`supervisord`
   can't switch to the specified user, the program will not be started.
 
   .. note::
@@ -1115,14 +1119,18 @@ configuration.
   includes it.  A "glob" is a file pattern which matches a specified
   pattern according to the rules used by the Unix shell. No tilde
   expansion is done, but ``*``, ``?``, and character ranges expressed
-  with ``[]`` will be correctly matched.  Recursive includes from
-  included files are not supported.
+  with ``[]`` will be correctly matched.  The string expression is
+  evaluated against a dictionary that includes ``host_node_name``
+  and ``here`` (the directory of the supervisord config file).  Recursive
+  includes from included files are not supported.
 
   *Default*: No default (required)
 
   *Required*:  Yes.
 
   *Introduced*: 3.0
+
+  *Changed*: 3.3.0.  Added support for the ``host_node_name`` expansion.
 
 ``[include]`` Section Example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

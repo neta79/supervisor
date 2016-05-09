@@ -108,7 +108,9 @@ class Options:
                        os.path.join(here, 'supervisord.conf'),
                        'supervisord.conf',
                        'etc/supervisord.conf',
-                       '/etc/supervisord.conf']
+                       '/etc/supervisord.conf',
+                       '/etc/supervisor/supervisord.conf',
+                       ]
         self.searchpaths = searchpaths
 
         self.environ_expansions = {}
@@ -267,7 +269,7 @@ class Options:
             self.options, self.args = getopt.getopt(
                 args, "".join(self.short_options), self.long_options)
         except getopt.error as exc:
-            self.usage(repr(exc))
+            self.usage(str(exc))
 
         # Check for positional args
         if self.args and not self.positional_args_allowed:
@@ -568,7 +570,9 @@ class ServerOptions(Options):
             if need_close:
                 fp.close()
 
-        expansions = {'here':self.here}
+        host_node_name = platform.node()
+        expansions = {'here':self.here,
+                      'host_node_name':host_node_name}
         expansions.update(self.environ_expansions)
         if parser.has_section('include'):
             parser.expand_here(self.here)
@@ -843,8 +847,8 @@ class ServerOptions(Options):
             return self._processes_from_section(
                 parser, section, group_name, klass)
         except ValueError as e:
-            filename = parser.section_to_file.get(section, '???')
-            raise ValueError('%s in section %r (file: %s)'
+            filename = parser.section_to_file.get(section, self.configfile)
+            raise ValueError('%s in section %r (file: %r)'
                              % (e, section, filename))
 
     def _processes_from_section(self, parser, section, group_name,
@@ -1021,10 +1025,12 @@ class ServerOptions(Options):
         get = parser.saneget
         username = get(section, 'username', None)
         password = get(section, 'password', None)
-        if username is None and password is not None:
-            raise ValueError(
-                'Must specify username if password is specified in [%s]'
-                % section)
+        if username is not None or password is not None:
+            if username is None or password is None:
+                raise ValueError(
+                    'Section [%s] contains incomplete authentication: '
+                    'If a username or a password is specified, both the '
+                    'username and password must be specified' % section)
         return {'username':username, 'password':password}
 
     def server_configs_from_parser(self, parser):
@@ -1326,10 +1332,10 @@ class ServerOptions(Options):
         os.setuid(uid)
 
     def waitpid(self):
-        # Need pthread_sigmask here to avoid concurrent sigchild, but Python
+        # Need pthread_sigmask here to avoid concurrent sigchld, but Python
         # doesn't offer in Python < 3.4.  There is still a race condition here;
-        # we can get a sigchild while we're sitting in the waitpid call.
-        # However, AFAICT, if waitpid is interrupted bu SIGCHILD, as long as we
+        # we can get a sigchld while we're sitting in the waitpid call.
+        # However, AFAICT, if waitpid is interrupted by SIGCHLD, as long as we
         # call waitpid again (which happens every so often during the normal
         # course in the mainloop), we'll eventually reap the child that we
         # tried to reap during the interrupted call. At least on Linux, this
@@ -1574,6 +1580,7 @@ class ClientOptions(Options):
     username = None
     password = None
     history_file = None
+    exit_on_error = None
 
     def __init__(self):
         Options.__init__(self, require_configfile=False)
@@ -1585,6 +1592,9 @@ class ClientOptions(Options):
         self.configroot.supervisorctl.username = None
         self.configroot.supervisorctl.password = None
         self.configroot.supervisorctl.history_file = None
+
+        # Set to 0 because it's only activated in realize() if not in interactive mode.
+        self.configroot.supervisorctl.exit_on_error = 0
 
         from supervisor.supervisorctl import DefaultControllerPlugin
         default_factory = ('default', DefaultControllerPlugin, {})
@@ -1605,6 +1615,8 @@ class ClientOptions(Options):
         Options.realize(self, *arg, **kw)
         if not self.args:
             self.interactive = 1
+
+        self.exit_on_error = 0 if self.interactive else 1
 
     def read_config(self, fp):
         section = self.configroot.supervisorctl

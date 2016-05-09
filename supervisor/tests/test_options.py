@@ -161,10 +161,13 @@ class OptionTests(unittest.TestCase):
 
     def test_searchpaths(self):
         options = self._makeOptions()
-        self.assertEqual(len(options.searchpaths), 5)
-        self.assertTrue('supervisord.conf' in options.searchpaths)
-        self.assertTrue('etc/supervisord.conf' in options.searchpaths)
-        self.assertTrue('/etc/supervisord.conf' in options.searchpaths)
+        self.assertEqual(len(options.searchpaths), 6)
+        self.assertEqual(options.searchpaths[-4:], [
+            'supervisord.conf',
+            'etc/supervisord.conf',
+            '/etc/supervisord.conf',
+            '/etc/supervisor/supervisord.conf',
+            ])
 
     def test_options_and_args_order(self):
         # Only config file exists
@@ -957,6 +960,35 @@ class ServerOptionsTests(unittest.TestCase):
         finally:
             shutil.rmtree(dirname, ignore_errors=True)
 
+    def test_read_config_include_expands_host_node_name(self):
+        dirname = tempfile.mkdtemp()
+        conf_d = os.path.join(dirname, "conf.d")
+        os.mkdir(conf_d)
+
+        supervisord_conf = os.path.join(dirname, "supervisord.conf")
+        text = lstrip("""\
+        [supervisord]
+
+        [include]
+        files=%s/conf.d/%s.conf
+        """ % (dirname, "%(host_node_name)s"))
+        with open(supervisord_conf, 'w') as f:
+            f.write(text)
+
+        conf_file = os.path.join(conf_d, "%s.conf" % platform.node())
+        with open(conf_file, 'w') as f:
+            f.write("[inet_http_server]\nport=8000\n")
+
+        instance = self._makeOne()
+        try:
+            instance.read_config(supervisord_conf)
+        finally:
+            shutil.rmtree(dirname, ignore_errors=True)
+        options = instance.configroot.supervisord
+        self.assertEqual(len(options.server_configs), 1)
+        msg = 'Included extra file "%s" during parsing' % conf_file
+        self.assertTrue(msg in instance.parse_infos)
+
     def test_read_config_include_expands_here(self):
         conf = os.path.join(
             os.path.abspath(os.path.dirname(__file__)), 'fixtures',
@@ -1037,8 +1069,7 @@ class ServerOptionsTests(unittest.TestCase):
         instance.configfile=StringIO('[supervisord]')
         instance.realize(args=["--bad=1"])
         self.assertEqual(len(recorder), 1)
-        self.assertEqual(recorder[0],
-            "GetoptError('option --bad not recognized', 'bad')")
+        self.assertEqual(recorder[0], "option --bad not recognized")
 
     def test_options_afunix(self):
         instance = self._makeOne()
@@ -1138,6 +1169,28 @@ class ServerOptionsTests(unittest.TestCase):
             self.assertEqual(exc.args[0],
                 "section [unix_http_server] has no file value")
 
+    def test_options_afunix_username_without_password(self):
+        instance = self._makeOne()
+        text = lstrip("""\
+        [supervisord]
+
+        [unix_http_server]
+        file=/tmp/supvtest.sock
+        username=usernamehere
+        ;no password=
+        chmod=0755
+        """)
+        instance.configfile = StringIO(text)
+        try:
+            instance.read_config(StringIO(text))
+            self.fail("nothing raised")
+        except ValueError as exc:
+            self.assertEqual(exc.args[0],
+                'Section [unix_http_server] contains incomplete '
+                'authentication: If a username or a password is '
+                'specified, both the username and password must '
+                'be specified')
+
     def test_options_afunix_password_without_username(self):
         instance = self._makeOne()
         text = lstrip("""\
@@ -1145,6 +1198,7 @@ class ServerOptionsTests(unittest.TestCase):
 
         [unix_http_server]
         file=/tmp/supvtest.sock
+        ;no username=
         password=passwordhere
         chmod=0755
         """)
@@ -1154,8 +1208,10 @@ class ServerOptionsTests(unittest.TestCase):
             self.fail("nothing raised")
         except ValueError as exc:
             self.assertEqual(exc.args[0],
-                "Must specify username if password is specified "
-                "in [unix_http_server]")
+                'Section [unix_http_server] contains incomplete '
+                'authentication: If a username or a password is '
+                'specified, both the username and password must '
+                'be specified')
 
     def test_options_afunix_file_expands_here(self):
         instance = self._makeOne()
@@ -1181,6 +1237,28 @@ class ServerOptionsTests(unittest.TestCase):
         self.assertEqual(serverconf['file'],
             os.path.join(here, 'supervisord.sock'))
 
+    def test_options_afinet_username_without_password(self):
+        instance = self._makeOne()
+        text = lstrip("""\
+        [supervisord]
+
+        [inet_http_server]
+        file=/tmp/supvtest.sock
+        username=usernamehere
+        ;no password=
+        chmod=0755
+        """)
+        instance.configfile = StringIO(text)
+        try:
+            instance.read_config(StringIO(text))
+            self.fail("nothing raised")
+        except ValueError as exc:
+            self.assertEqual(exc.args[0],
+                'Section [inet_http_server] contains incomplete '
+                'authentication: If a username or a password is '
+                'specified, both the username and password must '
+                'be specified')
+
     def test_options_afinet_password_without_username(self):
         instance = self._makeOne()
         text = lstrip("""\
@@ -1196,8 +1274,10 @@ class ServerOptionsTests(unittest.TestCase):
             self.fail("nothing raised")
         except ValueError as exc:
             self.assertEqual(exc.args[0],
-                "Must specify username if password is specified "
-                "in [inet_http_server]")
+                'Section [inet_http_server] contains incomplete '
+                'authentication: If a username or a password is '
+                'specified, both the username and password must '
+                'be specified')
 
     def test_options_afinet_no_port(self):
         instance = self._makeOne()
@@ -1850,6 +1930,68 @@ class ServerOptionsTests(unittest.TestCase):
             )
         self.assertEqual(cat_0.command, expected)
 
+    def test_options_error_handler_shows_main_filename(self):
+        dirname = tempfile.mkdtemp()
+        supervisord_conf = os.path.join(dirname, 'supervisord.conf')
+        text = lstrip('''
+        [supervisord]
+
+        [program:cat]
+        command = /bin/cat
+        stopsignal = NOTASIGNAL
+        ''')
+        with open(supervisord_conf, 'w') as f:
+            f.write(text)
+
+        instance = self._makeOne()
+        try:
+            instance.configfile = supervisord_conf
+            try:
+                instance.process_config(do_usage=False)
+                self.fail('nothing raised')
+            except ValueError as e:
+                self.assertEqual(str(e.args[0]),
+                    "value 'NOTASIGNAL' is not a valid signal name "
+                    "in section 'program:cat' (file: %r)" % supervisord_conf)
+        finally:
+            shutil.rmtree(dirname, ignore_errors=True)
+
+    def test_options_error_handler_shows_included_filename(self):
+        dirname = tempfile.mkdtemp()
+        supervisord_conf = os.path.join(dirname, "supervisord.conf")
+        text = lstrip("""\
+        [supervisord]
+
+        [include]
+        files=%s/conf.d/*.conf
+        """ % dirname)
+        with open(supervisord_conf, 'w') as f:
+            f.write(text)
+
+        conf_d = os.path.join(dirname, "conf.d")
+        os.mkdir(conf_d)
+        included_conf = os.path.join(conf_d, "included.conf")
+        text = lstrip('''\
+        [program:cat]
+        command = /bin/cat
+        stopsignal = NOTASIGNAL
+        ''')
+        with open(included_conf, 'w') as f:
+            f.write(text)
+
+        instance = self._makeOne()
+        try:
+            instance.configfile = supervisord_conf
+            try:
+                instance.process_config(do_usage=False)
+                self.fail('nothing raised')
+            except ValueError as e:
+                self.assertEqual(str(e.args[0]),
+                    "value 'NOTASIGNAL' is not a valid signal name "
+                    "in section 'program:cat' (file: %r)" % included_conf)
+        finally:
+            shutil.rmtree(dirname, ignore_errors=True)
+
     def test_processes_from_section_bad_program_name_spaces(self):
         instance = self._makeOne()
         text = lstrip("""\
@@ -2009,7 +2151,7 @@ class ServerOptionsTests(unittest.TestCase):
             except ValueError as e:
                 self.assertEqual(e.args[0],
                     "program section program:foo does not specify a command "
-                    "in section 'program:foo' (file: %s)" % f.name)
+                    "in section 'program:foo' (file: %r)" % f.name)
             else:
                 self.fail('nothing raised')
 
